@@ -6,7 +6,7 @@ import asyncio
 import os
 import tempfile
 
-from brokers import BaseBroker
+from brokers import BaseBroker, BrokerError
 from engine import Engine
 from signal_parser import parse_message
 
@@ -439,6 +439,25 @@ async def run():
     e.state.data["skipped"]["3122"] -= 15 * 60
     await e.on_message(3122, FIXED, edited=True)
     check("corrected 15 min later -> too late, not traded", not b.ord)
+
+    print("Signal typed in steps, then edited (msg 3130, 5 Nov)")
+    class Strict(FakeBroker):
+        """like MT5: modifying an order to the same values is an error (10025 No changes)"""
+        async def modify_order(self, t, s, price, sl, tp):
+            o = self.ord[t]
+            if o["price"] == price and o["sl"] == sl and o["tp"] == tp:
+                raise BrokerError("modify order failed: 10025 No changes")
+            o.update(price=price, sl=sl, tp=tp)
+    b = Strict(bid=4126.0, balance=500)
+    e = new_engine(b); await e.start()
+    await e.on_message(3130, "BUY AGAIN 4125")
+    await e.on_message(3130, "BUY AGAIN 4125\n\nSL:4121", edited=True)
+    await e.on_message(3130, "BUY AGAIN 4125\n\nSL:4121\n\nTP:4127\n\nTP:4129", edited=True)
+    o = list(b.ord.values())
+    check("placed once SL+TPs arrive: buy limit 0.01 @ 4125, TP1 4127 (0.01 lot)", len(o) == 1 and o[0]["tp"] == 4127)
+    await e.on_message(3130, "BUY AGAIN 4125\n\nSL:4121\n\nTP:4127\n\nTP:4129\n\nTP:4131\n\nTP:4133", edited=True)
+    check("more TPs added -> no 'No changes' error, 0.01 lot keeps TP1, signal knows 4 TPs",
+          list(b.ord.values())[0]["tp"] == 4127 and e.state.signals["3130"]["tps"][-1] == 4133)
 
     print("\nALL TESTS PASSED" if not FAILS else f"\n{len(FAILS)} FAILED: {FAILS}")
 

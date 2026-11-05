@@ -179,7 +179,7 @@ class MT5Broker(BaseBroker):
             m = self.mt5
             res = m.order_send(dict(action=m.TRADE_ACTION_SLTP, position=int(ticket), symbol=symbol,
                                     sl=float(sl), tp=float(tp), magic=self.magic))
-            if res is None or res.retcode != m.TRADE_RETCODE_DONE:
+            if res is None or res.retcode not in (m.TRADE_RETCODE_DONE, 10025):  # 10025 = no changes
                 raise BrokerError(f"modify position failed: {getattr(res, 'retcode', None)} "
                                   f"{getattr(res, 'comment', m.last_error())}")
         await self._run(_m)
@@ -190,7 +190,7 @@ class MT5Broker(BaseBroker):
             res = m.order_send(dict(action=m.TRADE_ACTION_MODIFY, order=int(ticket), symbol=symbol,
                                     price=float(price), sl=float(sl), tp=float(tp),
                                     type_time=m.ORDER_TIME_GTC))
-            if res is None or res.retcode != m.TRADE_RETCODE_DONE:
+            if res is None or res.retcode not in (m.TRADE_RETCODE_DONE, 10025):  # 10025 = no changes
                 raise BrokerError(f"modify order failed: {getattr(res, 'retcode', None)} "
                                   f"{getattr(res, 'comment', m.last_error())}")
         await self._run(_m)
@@ -216,7 +216,7 @@ class MT5Broker(BaseBroker):
         def _c():
             m = self.mt5
             res = m.order_send(dict(action=m.TRADE_ACTION_REMOVE, order=int(ticket)))
-            if res is None or res.retcode != m.TRADE_RETCODE_DONE:
+            if res is None or res.retcode not in (m.TRADE_RETCODE_DONE, 10025):  # 10025 = no changes
                 raise BrokerError(f"cancel failed: {getattr(res, 'retcode', None)} "
                                   f"{getattr(res, 'comment', m.last_error())}")
         await self._run(_c)

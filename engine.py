@@ -480,12 +480,21 @@ class Engine:
             leg_tp = self._r(sig.tps[0]) if leg.get("tp_mode") == "tp1" else new_tp
             if leg.get("tp_mode") == "entry" and pos:
                 leg_tp = pos["tp"]                                  # keep "exit at entry"
+            same = lambda x, y: abs(float(x or 0) - float(y or 0)) < 1e-6
             if pos:
                 sl = new_sl if leg["stage"] == 0 else pos["sl"]     # never undo protection
+                if same(sl, pos["sl"]) and same(leg_tp, pos["tp"]):
+                    continue                                        # nothing to change for this entry
                 if self._sl_valid(s["direction"], sl, bid, ask):
                     await self.b.modify_position(pos["ticket"], self.sym, sl, leg_tp)
             elif order:
+                if same(new_sl, order["sl"]) and same(leg_tp, order["tp"]):
+                    continue
                 await self.b.modify_order(order["ticket"], self.sym, order["price"], new_sl, leg_tp)
+            else:
+                continue
+            log.info("Signal %s leg %d updated after edit: SL %s TP %s", s["msg_id"], leg["n"],
+                     sl if pos else new_sl, leg_tp)
             self.journal.write("edited", msg_id=s["msg_id"], leg=leg["n"], sl=new_sl, tp=leg_tp,
                                ticket=leg["ticket"])
 
