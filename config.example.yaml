@@ -1,0 +1,78 @@
+# Copy this file to config.yaml and fill it in.
+# All prices/distances below are in gold price units (US dollars), e.g. 0.3 = 30 cents.
+
+telegram:
+  api_id: 1234567                 # from https://my.telegram.org -> API development tools
+  api_hash: "paste_your_api_hash"
+  session_name: "signal_bot"
+  chat: -1001234567890            # the group's numeric ID (run: python list_chats.py)
+                                  # a public @username also works
+
+broker:
+  backend: "mt5"                  # "mt5" = Windows / Windows VPS with MT5 terminal installed
+                                  # "metaapi" = any OS (Mac, Linux...) via metaapi.cloud
+  mt5:
+    path: ""                      # optional, e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
+    login: 0                      # leave 0 to use the account already logged in to the terminal
+    password: ""
+    server: ""
+    deviation_points: 30          # max slippage for market orders
+  metaapi:
+    token: ""
+    account_id: ""
+
+trading:
+  symbol: "XAUUSD"                # EXACT name in your MT5 Market Watch (XAUUSD, XAUUSDm, GOLD, XAUUSD.r ...)
+
+  # --- safety switches (start with these as they are) ---
+  dry_run: true                   # true = read & log signals only, never trade. Set false to trade.
+  allow_live: false               # false = refuse to trade on a real-money account
+
+  # --- position size ---
+  risk_percent: 1.0               # % of balance lost if the stop loss is hit
+  risk_basis: "balance"           # or "equity"
+  max_lot: 1.0                    # hard cap on lot size
+  min_lot_max_risk_percent: 2.0   # if 1% is smaller than the minimum lot, still use the minimum lot
+                                  # but only if that keeps risk at or below this %
+
+  # --- entry ---
+  two_entries: true               # "SELL 3909 - 3911.5" / "Buy 3898 & 3895" = two orders, one at each price
+  split_risk: true                # true = risk_percent shared between the two entries (0.5% + 0.5%)
+                                  # false = each entry risks the full risk_percent
+  entry_tolerance: 0.5            # enter at market if price is within $0.5 of an entry price
+  when_price_worse: "limit"       # price already moved past the entry: "limit" = place a limit order
+                                  # at the entry, "market" = enter anyway, "skip" = ignore (first entry only;
+                                  # the second, deeper entry is always a limit order)
+  pending_expiry_minutes: 240     # cancel a limit order that hasn't filled after this
+  cancel_pending_if_tp1_hit: true # cancel an unfilled limit order if price runs to TP1 without it
+  max_spread: 0.6                 # don't enter at market if the spread is wider than this
+  max_price_deviation_pct: 1.5    # reject signals whose prices are far from the market (typos)
+  max_open_signals: 3             # max signals traded at the same time
+
+  # --- protection ("insurance") ---
+  breakeven:
+    enabled: true
+    offset: 0.3                   # SL goes to entry + $0.30 (buys) to cover spread/commission
+    ladder: true                  # TP1 hit -> SL to entry, TP2 hit -> SL to TP1, TP3 hit -> SL to TP2 ...
+    single_tp_trigger_pct: 50     # signal with only 1 TP: move SL to entry at 50% of the way to TP
+
+  # --- taking profit along the way ---
+  partial_close:
+    enabled: true                 # close an equal part of the trade at every TP, the last part runs to the last TP
+                                  # e.g. 0.04 lots, 4 TPs: 0.01 at TP1, TP2, TP3, last 0.01 at TP4
+                                  # a 0.01-lot trade can't be split, so its TP is set to TP1 instead
+
+  # --- follow-up messages from the group ---
+  commands:
+    enabled: true                 # "SL to BE", "move SL to 2655", "close", "close half", "cancel"
+    apply_to_latest_if_not_reply: true   # not a reply to a signal -> apply to the newest trade
+    obey_partial_close: false     # "نغلق جزء / احجز" (close part): false = keep the bot's equal closes at each TP
+                                  # true = also close half of each trade when the admin says so
+    reenter_max_hours: 12         # "نرجع ندخل بنفس المعطيات" re-enters a signal only up to 12 h after it was posted
+  edit_retry_minutes: 10          # a skipped signal (typo price) that the admin fixes within 10 min is checked again
+  fix_hundreds_typo: false        # true = every price 100 off the market (4021 typed for 4121) -> trade it as 4121
+  allowed_sender_ids: []          # optional: only obey these Telegram user IDs (the signal admins)
+
+  require_symbol_word: false      # true = only trade messages that say GOLD / XAU
+  magic: 20261104                 # tag on the bot's orders in MT5
+  poll_seconds: 2                 # how often open trades are checked

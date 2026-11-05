@@ -1,0 +1,22 @@
+# --- private: never commit these ---
+# Telegram API keys and broker login
+config.yaml
+# Telegram login files (give access to your Telegram account)
+*.session
+*.session-journal
+# open trades the bot is managing, trade history, logs
+state.json
+state.json.tmp
+trades_journal.csv
+bot.log
+# exported group history
+group_messages.json
+parser_report.txt
+
+# --- Python / OS ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+Thumbs.db
