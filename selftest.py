@@ -485,6 +485,17 @@ async def run():
     await e.monitor_once()
     check("not filled after 25 minutes -> cancelled", not b.ord)
 
+    print("Messages delivered late after a restart")
+    from datetime import datetime, timedelta, timezone
+    b = FakeBroker(bid=3906.5)
+    e = new_engine(b); await e.start()
+    await e.on_message(401, G5, msg_time=datetime.now(timezone.utc) - timedelta(seconds=20))
+    check("signal 20 s old (during a restart) -> traded", len(b.pos) == 1)
+    b = FakeBroker(bid=3906.5)
+    e = new_engine(b); await e.start()
+    await e.on_message(402, G5, msg_time=datetime.now(timezone.utc) - timedelta(minutes=10))
+    check("signal 10 min old (bot was off) -> ignored", not b.pos and not b.ord)
+
     print("\nALL TESTS PASSED" if not FAILS else f"\n{len(FAILS)} FAILED: {FAILS}")
 
 

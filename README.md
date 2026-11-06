@@ -99,7 +99,9 @@ set `allow_live: true`.
 
 | File | Purpose |
 |---|---|
-| `bot.py` | Start the bot |
+| `start_bot.bat` | **Start here on Windows.** Runs `run.py`, which keeps the bot running and restarts it after `git pull` or a settings change |
+| `run.py` | Restarts the bot if it stops, and when a `.py` file or `config.yaml` changes |
+| `bot.py` | The bot itself (`python bot.py` runs it without auto-restart) |
 | `config.yaml` | Your settings (keep private) |
 | `signal_parser.py` | Reads signal text — tune here if your group writes differently |
 | `engine.py` | Sizing, entry, break-even, commands, safety |
@@ -130,3 +132,14 @@ set `allow_live: true`.
 | `retcode 10016 Invalid stops` | Broker's minimum stop distance — the bot logs it and retries. |
 | `LIVE account and allow_live is false` | Working as designed; see step 10. |
 | Signal "ignored" in the log | Paste the message text to whoever maintains the parser so the format can be added. |
+
+## Updating
+
+1. Leave `start_bot.bat` running.
+2. In the bot folder run `git pull`.
+3. That's it: within a few seconds the bot restarts on the new code (the window shows
+   `code or settings changed - restarting the bot`). Saving `config.yaml` restarts it the same way.
+
+Open trades carry on after the restart. Messages posted during the few seconds of the
+restart are still received; anything older than 2 minutes (`max_message_age_seconds`)
+is ignored, so a long stop never makes the bot act on old signals.

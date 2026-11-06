@@ -29,7 +29,7 @@ import logging
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from brokers import BaseBroker, BrokerError
@@ -61,6 +61,7 @@ DEFAULTS = {
     "commands": {"enabled": True, "apply_to_latest_if_not_reply": True,
                  "obey_partial_close": False, "reenter_max_hours": 12},
     "edit_retry_minutes": 10,
+    "max_message_age_seconds": 120,
     "fix_hundreds_typo": False,
     "allowed_sender_ids": [],
     "poll_seconds": 2,
@@ -203,10 +204,17 @@ class Engine:
         return [l for l in s["legs"] if l["status"] in ACTIVE and l.get("ticket")]
 
     # ------------------------------------------------------------ messages
-    async def on_message(self, msg_id, text, reply_to=None, sender_id=None, edited=False):
+    async def on_message(self, msg_id, text, reply_to=None, sender_id=None, edited=False, msg_time=None):
         allowed = [int(x) for x in (self.c.get("allowed_sender_ids") or [])]
         if allowed and sender_id is not None and int(sender_id) not in allowed:
             return
+        if msg_time is not None:
+            age = (datetime.now(timezone.utc) - msg_time).total_seconds()
+            if age > float(self.c["max_message_age_seconds"]):
+                # delivered late (bot was stopped / restarting): too old to act on safely
+                if any(w in (text or "").upper() for w in ("BUY", "SELL", "SL", "TP")) or len(text or "") < 120:
+                    log.info("Ignored msg %s: %.0f s old (received after a restart)", msg_id, age)
+                return
         async with self.lock:
             try:
                 await self._handle(str(msg_id), text or "", reply_to, edited)

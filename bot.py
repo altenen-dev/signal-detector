@@ -10,6 +10,7 @@ After that the login is saved in <session_name>.session (keep that file private)
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 import yaml
@@ -61,8 +62,10 @@ async def main():
                     journal_path=os.path.join(HERE, "trades_journal.csv"))
     await engine.start()
 
+    # catch_up: after a short stop (e.g. an automatic restart for an update) Telegram sends the
+    # messages that arrived meanwhile; the engine ignores anything older than max_message_age_seconds
     client = TelegramClient(os.path.join(HERE, tg.get("session_name", "signal_bot")),
-                            int(tg["api_id"]), tg["api_hash"])
+                            int(tg["api_id"]), tg["api_hash"], catch_up=True)
     await client.start()
     chat = await resolve_chat(client, tg["chat"])
     title = getattr(chat, "title", None) or getattr(chat, "username", chat.id)
@@ -70,19 +73,36 @@ async def main():
 
     @client.on(events.NewMessage(chats=chat))
     async def on_new(ev):
-        await engine.on_message(ev.message.id, ev.raw_text, ev.message.reply_to_msg_id, ev.sender_id)
+        await engine.on_message(ev.message.id, ev.raw_text, ev.message.reply_to_msg_id, ev.sender_id,
+                                msg_time=ev.message.date)
 
     @client.on(events.MessageEdited(chats=chat))
     async def on_edit(ev):
         await engine.on_message(ev.message.id, ev.raw_text, ev.message.reply_to_msg_id, ev.sender_id,
-                                edited=True)
+                                edited=True, msg_time=ev.message.edit_date or ev.message.date)
 
     monitor = asyncio.create_task(engine.monitor_loop())
+
+    # clean stop when run.py restarts the bot (Ctrl+Break on Windows, SIGTERM elsewhere)
+    loop = asyncio.get_running_loop()
+
+    def _stop(*_):
+        log.info("Stop requested - shutting down cleanly")
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(client.disconnect()))
+
+    for name in ("SIGBREAK", "SIGTERM"):
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), _stop)
+            except (ValueError, OSError):
+                pass
+
     log.info("Bot is running. Press Ctrl+C to stop.")
     try:
         await client.run_until_disconnected()
     finally:
         monitor.cancel()
+        engine.state.save()
 
 
 if __name__ == "__main__":
