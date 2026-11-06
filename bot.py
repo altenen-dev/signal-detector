@@ -23,6 +23,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def setup_logging():
+    # Windows: when the output goes to a pipe (run.py, VS Code) Python defaults to cp1252, which
+    # cannot print emojis or Arabic ("NP VIP 👑", "نامن") - force UTF-8 and never crash on a character
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     fmt = logging.Formatter("%(asctime)s  %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
     root.setLevel(logging.INFO)

@@ -33,7 +33,8 @@ def fingerprint():
 
 def start_bot():
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if WIN else 0
-    return subprocess.Popen([sys.executable, "bot.py", *sys.argv[1:]], cwd=HERE, creationflags=flags)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8:replace", PYTHONUTF8="1")
+    return subprocess.Popen([sys.executable, "bot.py", *sys.argv[1:]], cwd=HERE, creationflags=flags, env=env)
 
 
 def stop_bot(p):
@@ -50,6 +51,10 @@ def stop_bot(p):
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     say("starting the bot - it restarts by itself after `git pull` or when you change a file here")
     bot, prints = start_bot(), fingerprint()
     try:
