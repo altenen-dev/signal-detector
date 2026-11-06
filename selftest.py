@@ -429,7 +429,9 @@ async def run():
     await e2.monitor_once()
     check("limit is NOT cancelled just because price started below TP1", len(b2.ord) == 1)
     b2.tick(4120.0); await e2.monitor_once(); b2.tick(4118.5); await e2.monitor_once()
-    check("price rose to 4120 then fell to TP1 without filling -> cancelled (move missed)", not b2.ord)
+    check("price rose to 4120 (not to the entry) then fell to TP1 -> order keeps waiting", len(b2.ord) == 1)
+    b2.tick(4120.7); await e2.monitor_once(); b2.tick(4118.5); await e2.monitor_once()
+    check("price came to the entry (4120.7) then ran to TP1 without filling -> cancelled (move missed)", not b2.ord)
     e.state.data["skipped"]["3121"] -= 5 * 60           # admin corrects it 5 minutes later
     await e.on_message(3121, FIXED, edited=True)
     check("corrected 5 min later -> checked again and placed", len(b.ord) == 1 and list(b.ord.values())[0]["price"] == 4121)
@@ -458,6 +460,30 @@ async def run():
     await e.on_message(3130, "BUY AGAIN 4125\n\nSL:4121\n\nTP:4127\n\nTP:4129\n\nTP:4131\n\nTP:4133", edited=True)
     check("more TPs added -> no 'No changes' error, 0.01 lot keeps TP1, signal knows 4 TPs",
           list(b.ord.values())[0]["tp"] == 4127 and e.state.signals["3130"]["tps"][-1] == 4133)
+
+    print("BUY LIMIT just below the market (msg 3156, 6 Nov)")
+    S3156 = "GOLD BUY LIMIT 4075\n\nSL:4071\n\nTP:4077\n\nTP:4079\n\nTP:4081\n\nTP:4085"
+    b = FakeBroker(bid=4076.2, balance=500)
+    e = new_engine(b); await e.start()
+    await e.on_message(3156, S3156)
+    check("price 4076.2 -> buy limit waits at 4075", len(b.ord) == 1 and list(b.ord.values())[0]["price"] == 4075)
+    b.tick(4077.3); await e.monitor_once()
+    check("price wobbles up to TP1 4077 without coming to 4075 -> NOT cancelled", len(b.ord) == 1)
+    b.tick(4074.6); await e.monitor_once()
+    check("price dips to 4075 -> buy fills", e.state.signals["3156"]["legs"][0]["status"] == "open")
+    b = FakeBroker(bid=4076.2, balance=500)
+    e = new_engine(b); await e.start()
+    await e.on_message(3157, S3156)
+    b.tick(4085.5); await e.monitor_once()
+    check("price runs past the last TP 4085 without filling -> cancelled, the move is over", not b.ord)
+    b = FakeBroker(bid=4076.2, balance=500)
+    e = new_engine(b); await e.start()
+    await e.on_message(3158, S3156)
+    await e.monitor_once()
+    check("still waiting after a moment", len(b.ord) == 1)
+    e.state.signals["3158"]["legs"][0]["created"] -= 26 * 60
+    await e.monitor_once()
+    check("not filled after 25 minutes -> cancelled", not b.ord)
 
     print("\nALL TESTS PASSED" if not FAILS else f"\n{len(FAILS)} FAILED: {FAILS}")
 

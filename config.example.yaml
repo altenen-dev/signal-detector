@@ -43,8 +43,10 @@ trading:
   when_price_worse: "limit"       # price already moved past the entry: "limit" = place a limit order
                                   # at the entry, "market" = enter anyway, "skip" = ignore (first entry only;
                                   # the second, deeper entry is always a limit order)
-  pending_expiry_minutes: 240     # cancel a limit order that hasn't filled after this
-  cancel_pending_if_tp1_hit: true # cancel an unfilled limit order if price runs to TP1 without it
+  pending_expiry_minutes: 25      # cancel a limit order that hasn't filled after 25 minutes
+  cancel_pending_if_tp1_hit: true # cancel a waiting order at TP1 only if price first came to the entry
+                                  # (missed by a hair) or another entry of the signal is already in the trade.
+                                  # A waiting order is also cancelled if price passes the LAST TP (move over).
   max_spread: 0.6                 # don't enter at market if the spread is wider than this
   max_price_deviation_pct: 1.5    # reject signals whose prices are far from the market (typos)
   max_open_signals: 3             # max signals traded at the same time

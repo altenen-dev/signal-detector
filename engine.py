@@ -51,7 +51,7 @@ DEFAULTS = {
     "max_spread": 0.6,
     "entry_tolerance": 0.5,
     "when_price_worse": "limit",          # limit | market | skip   (first leg only)
-    "pending_expiry_minutes": 240,
+    "pending_expiry_minutes": 25,
     "cancel_pending_if_tp1_hit": True,
     "max_price_deviation_pct": 1.5,
     "max_open_signals": 3,
@@ -375,8 +375,7 @@ class Engine:
         rec = dict(msg_id=msg_id, direction=sig.direction, tps=sig.tps, signal_sl=sig.sl,
                    entry_low=sig.entry_low, entry_high=sig.entry_high, created=time.time(),
                    status="dry" if not self.trading_enabled else "pending", legs=[],
-                   sig=sig.to_dict(), origin=getattr(sig, "origin", msg_id),
-                   tp1_armed=not past_tp1)
+                   sig=sig.to_dict(), origin=getattr(sig, "origin", msg_id))
 
         for i, kind, entry in plan:
             entry = self._r(entry)
@@ -791,12 +790,21 @@ class Engine:
         if age_min > float(self.c["pending_expiry_minutes"]):
             why = f"not filled after {self.c['pending_expiry_minutes']} min"
         else:
-            beyond = (buy and bid >= tp1) or (not buy and ask <= tp1)
-            if not beyond:
-                s["tp1_armed"] = True          # price is between TP1 and the entry now
+            # A waiting limit order is only "missed" if price actually came to the entry (within
+            # entry_tolerance) and then ran to TP1 without filling it, or if another entry of the
+            # same signal is already in the trade. Price wobbling up to TP1 from just above the
+            # entry is not a missed move - the order keeps waiting for the pullback.
+            tol = float(self.c["entry_tolerance"])
+            if (buy and ask <= order["price"] + tol) or (not buy and bid >= order["price"] - tol):
+                leg["touched"] = True
+            past_tp1 = (buy and bid >= tp1) or (not buy and ask <= tp1)
+            past_last = (buy and bid >= s["tps"][-1]) or (not buy and ask <= s["tps"][-1])
             started = any(l["status"] == "open" for l in s["legs"])
-            if self.c["cancel_pending_if_tp1_hit"] and beyond and (s.get("tp1_armed", True) or started):
-                why = "price reached TP1 before this entry filled"
+            if self.c["cancel_pending_if_tp1_hit"] and past_tp1 and (started or leg.get("touched")):
+                why = ("TP1 reached while another entry of this signal is in the trade" if started
+                       else "price came to the entry and ran to TP1 without filling it")
+            elif past_last:
+                why = "price reached the last TP without this entry filling - the move is over"
         if why:
             await self.b.cancel_order(order["ticket"])
             leg["status"] = "closed"
