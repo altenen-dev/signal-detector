@@ -8,6 +8,7 @@ protects the trade automatically.
 
 | Situation | What the bot does |
 |---|---|
+| Signal still being typed ("GOLD SELL LIMIT 4121", "GOLD BUY  Entry: 4052 & 4049  SL: TP:") | Placed straight away with a **temporary SL** ($6) and no TP. When the admin edits in the SL and TPs, waiting orders are replaced and open trades get the real SL/TP (lot reduced if the real SL is wider). Not finished within 5 min → waiting orders cancelled. |
 | Signal with one entry ("BUY NOW 3906.50") | One trade. **TP = the signal's last TP.** SL = the signal's SL. |
 | Signal with two prices ("SELL 3909 - 3911.5", "Buy 3898 & 3895", "sell limit 4020 and 4024") | **Two trades, one at each price**, same SL and last TP. |
 | Lot size | Calculated so hitting the SL loses **`risk_percent` %** of your balance — shared between the two entries by default (0.5% + 0.5%). |

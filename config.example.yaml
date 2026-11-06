@@ -58,6 +58,16 @@ trading:
     ladder: true                  # TP1 hit -> SL to entry, TP2 hit -> SL to TP1, TP3 hit -> SL to TP2 ...
     single_tp_trigger_pct: 50     # signal with only 1 TP: move SL to entry at 50% of the way to TP
 
+  # --- unfinished signals ---
+  early_entry:
+    enabled: true                 # place "GOLD SELL LIMIT 4121" / "GOLD BUY  Entry: 4052 & 4049  SL: TP:" straight
+                                  # away, before the admin has written the SL and TPs; when he edits the
+                                  # message the orders are updated (SL, TP, lot size)
+    temp_sl_distance: 6.0         # temporary SL until the real one arrives ($6 from the entry)
+    allow_market: true            # false = only waiting orders (LIMIT/STOP) go in early, never at market
+    complete_minutes: 5           # signal still not finished after 5 min -> waiting orders cancelled
+                                  # (a trade already open stays, with its SL, and follows the admin's commands)
+
   # --- taking profit along the way ---
   partial_close:
     enabled: true                 # close an equal part of the trade at every TP, the last part runs to the last TP

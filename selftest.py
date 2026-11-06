@@ -68,9 +68,10 @@ class FakeBroker(BaseBroker):
                                    open_price=o["price"], sl=o["sl"], tp=o["tp"])
                 del self.ord[t]
         for t, p in list(self.pos.items()):
-            if p["direction"] == "BUY" and (self.bid <= p["sl"] or self.bid >= p["tp"]):
+            tp = p["tp"] or None                    # 0 = no TP
+            if p["direction"] == "BUY" and (self.bid <= p["sl"] or (tp and self.bid >= tp)):
                 del self.pos[t]
-            if p["direction"] == "SELL" and (self.ask >= p["sl"] or self.ask <= p["tp"]):
+            elif p["direction"] == "SELL" and (self.ask >= p["sl"] or (tp and self.ask <= tp)):
                 del self.pos[t]
 
 
@@ -495,6 +496,69 @@ async def run():
     e = new_engine(b); await e.start()
     await e.on_message(402, G5, msg_time=datetime.now(timezone.utc) - timedelta(minutes=10))
     check("signal 10 min old (bot was off) -> ignored", not b.pos and not b.ord)
+
+    print("Unfinished signals placed early, completed by edits (msgs 3150, 3121)")
+    D3150 = "GOLD BUY🟢\n\nEntry: 4052 & 5049\n\nSL:\n\nTP:\nTP:\nTP:\nTP:"
+    F3150 = "GOLD BUY🟢\n\nEntry: 4052 & 4049\n\nSL:4044\n\nTP:4054\nTP:4056\nTP:4058\nTP:4065"
+    b = FakeBroker(bid=4052.2, balance=5000)
+    e = new_engine(b); await e.start()
+    await e.on_message(3150, D3150)
+    p = list(b.pos.values())
+    check("'Entry: 4052 & 5049' (typo, no SL/TP) -> buys 4052 now, typo 5049 ignored, temporary SL 4046, no TP",
+          len(p) == 1 and p[0]["sl"] == 4046 and not p[0]["tp"] and not b.ord)
+    v0 = p[0]["volume"]
+    await e.on_message(3150, D3150, edited=True)
+    check("same unfinished text again -> nothing new placed", len(b.pos) == 1 and not b.ord)
+    await e.on_message(3150, F3150, edited=True)
+    t = e.state.signals["3150"]["legs"][0]["ticket"]
+    o = list(b.ord.values())
+    check(f"completed -> trade gets real SL 4044 + TP 4065, lot cut {v0} -> {b.pos[t]['volume']} for the wider SL",
+          b.pos[t]["sl"] == 4044 and b.pos[t]["tp"] == 4065 and b.pos[t]["volume"] < v0)
+    check("completed -> second entry 4049 placed as buy limit with SL 4044",
+          len(o) == 1 and o[0]["price"] == 4049 and o[0]["sl"] == 4044 and o[0]["tp"] == 4065)
+    b.tick(4054.1); await e.monitor_once()
+    check("TP1 4054 -> partial close + SL to entry, unfilled 4049 cancelled",
+          b.pos[t]["sl"] > 4052 and not b.ord)
+
+    b = FakeBroker(bid=4116.87, balance=5000)
+    e = new_engine(b); await e.start()
+    await e.on_message(3121, "GOLD SELL LIMIT 4121")
+    o = list(b.ord.values())
+    check("'GOLD SELL LIMIT 4121' alone -> sell limit 4121 now, temporary SL 4127", len(o) == 1 and o[0]["sl"] == 4127)
+    await e.on_message(3121, "GOLD SELL LIMIT 4121\n\nSL:4126", edited=True)
+    check("SL added -> order SL changed to 4126", list(b.ord.values())[0]["sl"] == 4126)
+    await e.on_message(3121, "GOLD SELL LIMIT 4121\n\nSL:4126\n\nTP:4119\n\nTP:4117.80\n\nTP:4115.70", edited=True)
+    o = list(b.ord.values())
+    check("TPs added -> order replaced: sell limit 4121, SL 4126, TP 4115.7",
+          len(o) == 1 and o[0]["price"] == 4121 and o[0]["sl"] == 4126 and o[0]["tp"] == 4115.7)
+    check("completed signal behaves like a normal one", not e.state.signals["3121"]["draft"])
+
+    b = FakeBroker(bid=4116.87, balance=5000)
+    e = new_engine(b); await e.start()
+    await e.on_message(3122, "GOLD SELL LIMIT 4121")
+    e.state.signals["3122"]["legs"][0]["created"] -= 6 * 60
+    await e.monitor_once()
+    check("admin never finishes it -> waiting order cancelled after 5 min", not b.ord)
+
+    b = FakeBroker(bid=4168.0, balance=5000)
+    e = new_engine(b); await e.start()
+    await e.on_message(2309, "Gold Buy now 4168")
+    b.tick(4170.0)
+    await e.on_message(2310, "شباب نصك جزأ ونأمن الصفقة")
+    t = e.state.signals["2309"]["legs"][0]["ticket"]
+    e.state.signals["2309"]["legs"][0]["created"] -= 6 * 60
+    await e.monitor_once()
+    check("'Gold Buy now 4168' never finished, admin says BE -> trade stays open with SL at entry",
+          t in b.pos and b.pos[t]["sl"] > 4168)
+
+    b = FakeBroker(bid=3903.5, balance=5000)
+    e = new_engine(b); await e.start()
+    await e.on_message(3073, "نرجع نشتري 3903")
+    check("chat 'نرجع نشتري 3903' -> no order", not b.pos and not b.ord)
+    b = FakeBroker(bid=4116.87, balance=5000)
+    e = new_engine(b, early_entry={"enabled": False}); await e.start()
+    await e.on_message(3123, "GOLD SELL LIMIT 4121")
+    check("early_entry off -> waits for the full signal", not b.ord)
 
     print("\nALL TESTS PASSED" if not FAILS else f"\n{len(FAILS)} FAILED: {FAILS}")
 

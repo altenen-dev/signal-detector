@@ -58,6 +58,10 @@ DEFAULTS = {
     "require_symbol_word": False,
     "breakeven": {"enabled": True, "offset": 0.3, "ladder": True, "single_tp_trigger_pct": 50},
     "partial_close": {"enabled": True},
+    # place an unfinished signal straight away ("GOLD SELL LIMIT 4121", "GOLD BUY  Entry: 4052 & 4049
+    # SL: TP:") and fill in SL / TP when the admin edits the message
+    "early_entry": {"enabled": True, "temp_sl_distance": 6.0, "allow_market": True,
+                    "complete_minutes": 5},
     "commands": {"enabled": True, "apply_to_latest_if_not_reply": True,
                  "obey_partial_close": False, "reenter_max_hours": 12},
     "edit_retry_minutes": 10,
@@ -254,6 +258,18 @@ class Engine:
             await self._open(msg_id, sig)
             return
 
+        if res.draft and self.c["early_entry"]["enabled"]:
+            s = self.state.signals.get(msg_id)
+            if s is not None:
+                if s.get("draft"):
+                    await self._update_draft(s, res.draft)
+                return
+            if self.state.processed(msg_id):
+                return
+            self.state.mark(msg_id)
+            await self._open(msg_id, res.draft, draft=True)
+            return
+
         if res.commands and self.c["commands"]["enabled"] and not edited:
             if self.state.processed(msg_id):
                 return
@@ -320,14 +336,20 @@ class Engine:
             return "market", px
         return "skip", px
 
-    async def _open(self, msg_id, sig: Signal):
-        j = dict(msg_id=msg_id, direction=sig.direction, sl=sig.sl, tp=sig.last_tp)
-        if len(self.state.active()) >= int(self.c["max_open_signals"]):
-            return self._reject(msg_id, "max_open_signals reached", j)
-
+    async def _open(self, msg_id, sig: Signal, draft=False, rec=None, skip=()):
+        """Place a signal. draft=True: SL/TPs not written yet - pending orders (and market if
+        allowed) go in with a temporary SL and no TP. rec/skip: finishing a draft - add the
+        entries that are not in the trade yet to the existing record."""
         bid, ask = await self.b.price(self.sym)
         buy = sig.direction == "BUY"
         px = ask if buy else bid
+        if draft:
+            sig = self._draft_signal(msg_id, sig, px)
+            if sig is None:
+                return
+        j = dict(msg_id=msg_id, direction=sig.direction, sl=sig.sl, tp=sig.tps[-1] if sig.tps else 0)
+        if rec is None and len(self.state.active()) >= int(self.c["max_open_signals"]):
+            return self._reject(msg_id, "max_open_signals reached", j)
 
         ref = sig.entry_mid if sig.entry_mid is not None else sig.sl
         dev = abs(ref - px) / px * 100
@@ -348,15 +370,23 @@ class Engine:
         if dev > float(self.c["max_price_deviation_pct"]):
             return self._reject(msg_id, f"signal price {ref} is {dev:.2f}% away from market {px}", j)
 
-        tp1, tp_last = sig.tps[0], sig.tps[-1]
-        past_tp1 = (buy and bid >= tp1) or (not buy and ask <= tp1)
-        if ((buy and bid >= tp_last) or (not buy and ask <= tp_last)) and sig.order_kind != "LIMIT":
-            return self._reject(msg_id, f"price already past the last TP ({tp_last})", j)
+        past_tp1 = False
+        if sig.tps:
+            tp1, tp_last = sig.tps[0], sig.tps[-1]
+            past_tp1 = (buy and bid >= tp1) or (not buy and ask <= tp1)
+            if ((buy and bid >= tp_last) or (not buy and ask <= tp_last)) and sig.order_kind != "LIMIT":
+                return self._reject(msg_id, f"price already past the last TP ({tp_last})", j)
 
         prices = self._entry_prices(sig)
         plan = []
         for i, p in enumerate(prices):
+            if i in skip:
+                continue
             kind, entry = self._decide_leg(sig, i, p, bid, ask)
+            if draft and kind == "market" and not self.c["early_entry"]["allow_market"]:
+                log.info("Signal %s leg %d: price is at the entry but SL/TP are not written yet - "
+                         "waiting for them (early_entry.allow_market is off)", msg_id, i + 1)
+                continue
             if kind == "skip":
                 log.info("Signal %s leg %d skipped: price %s away from %s (when_price_worse=skip)",
                          msg_id, i + 1, px, p)
@@ -365,11 +395,18 @@ class Engine:
                 return self._reject(msg_id, f"SL on wrong side of entry {entry}", j)
             plan.append((i, kind, entry))
         if not plan:
+            if rec is not None or draft:
+                return
             return self._reject(msg_id, "no entry left to place", j)
         # entering at market when the move to TP1 has already happened = too late.
         # A limit order that waits for a pullback (SELL LIMIT 4121, TP1 4119, price 4117) is fine.
         if past_tp1 and any(k == "market" for _, k, _ in plan):
-            return self._reject(msg_id, f"price already past TP1 ({tp1})", j)
+            if rec is not None:
+                plan = [x for x in plan if x[1] != "market"]
+                if not plan:
+                    return log.info("Signal %s: remaining entry not taken - price already past TP1", msg_id)
+            else:
+                return self._reject(msg_id, f"price already past TP1 ({sig.tps[0]})", j)
 
         if any(k == "market" for _, k, _ in plan):
             spread = ask - bid
@@ -379,11 +416,13 @@ class Engine:
                 return self._reject(msg_id, "price is already at/through the stop loss", j)
 
         n_share = len(prices) if self.c["split_risk"] else 1
-        sl, tp = self._r(sig.sl), self._r(sig.last_tp)
-        rec = dict(msg_id=msg_id, direction=sig.direction, tps=sig.tps, signal_sl=sig.sl,
-                   entry_low=sig.entry_low, entry_high=sig.entry_high, created=time.time(),
-                   status="dry" if not self.trading_enabled else "pending", legs=[],
-                   sig=sig.to_dict(), origin=getattr(sig, "origin", msg_id))
+        sl = self._r(sig.sl)
+        if rec is None:
+            rec = dict(msg_id=msg_id, direction=sig.direction, tps=sig.tps, signal_sl=sig.sl,
+                       entry_low=sig.entry_low, entry_high=sig.entry_high, created=time.time(),
+                       status="dry" if not self.trading_enabled else "pending", legs=[],
+                       sig=sig.to_dict(), origin=getattr(sig, "origin", msg_id),
+                       draft=draft, temp_sl=getattr(sig, "temp_sl", False))
 
         for i, kind, entry in plan:
             entry = self._r(entry)
@@ -391,12 +430,14 @@ class Engine:
             # a trade too small to split (0.01 lot) closes fully at TP1
             tp1_only = (self.c["partial_close"]["enabled"] and len(sig.tps) > 1
                         and lots > 0 and not self._splittable(lots))
-            tp = self._r(sig.tps[0]) if tp1_only else self._r(sig.last_tp)
+            tp = (self._r(sig.tps[0]) if tp1_only else self._r(sig.last_tp)) if sig.tps else 0.0
             leg = dict(n=i + 1, kind=kind, entry=entry, volume=lots, ticket=None, status="skipped",
                        stage=0, missing=0, sl_fail=0, created=time.time(),
                        tp_mode="tp1" if tp1_only else "last", tp_done=0, best=None)
             rec["legs"].append(leg)
-            plan_txt = self._plan_text(lots, sig.tps, tp1_only)
+            plan_txt = (self._plan_text(lots, sig.tps, tp1_only) if sig.tps else
+                        ("TEMPORARY SL, no TP yet - waiting for the admin to finish the signal"
+                         if getattr(sig, "temp_sl", False) else "no TP yet - waiting for the admin"))
             note = f"{note}; {plan_txt}"
             lj = dict(j, leg=i + 1, kind=kind, volume=lots, entry=entry, sl=sl, tp=tp)
             if lots <= 0:
@@ -423,6 +464,132 @@ class Engine:
 
         self.state.signals[msg_id] = rec
         _refresh(rec)
+
+    # ------------------------------------------------------------ unfinished signals
+    def _draft_signal(self, msg_id, d: Signal, px):
+        """Draft -> placeable signal: drop entries far from the market (typos like 5049),
+        temporary SL when the admin has not written one yet."""
+        dev_max = float(self.c["max_price_deviation_pct"])
+        entries = [e for e in {d.entry_low, d.entry_high} if e is not None and abs(e - px) / px * 100 <= dev_max]
+        if not entries:
+            log.info("Unfinished signal %s: entry %s is far from the market %s - waiting for the full signal",
+                     msg_id, d.entry_low, px)
+            self.state.data.setdefault("skipped", {})[msg_id] = time.time()
+            return None
+        lo, hi = min(entries), max(entries)
+        buy = d.direction == "BUY"
+        temp = d.sl is None
+        dist = float(self.c["early_entry"]["temp_sl_distance"])
+        first = hi if buy else lo
+        sl = d.sl if not temp else (first - dist if buy else first + dist)
+        if (buy and sl >= lo) or (not buy and sl <= hi):
+            return None
+        sig = Signal(direction=d.direction, sl=sl, tps=[], entry_low=lo, entry_high=hi,
+                     order_kind=d.order_kind, market=d.market)
+        sig.temp_sl = temp
+        log.info("UNFINISHED signal %s: %s entry %s SL %s (%s), no TP yet - placing it now",
+                 msg_id, d.direction, lo if lo == hi else f"{lo} & {hi}", self._r(sl),
+                 "temporary" if temp else "from the group")
+        return sig
+
+    async def _update_draft(self, s, d: Signal):
+        """the admin added the SL but no TPs yet: put the real SL on the orders"""
+        if d.sl is None or d.sl == s["signal_sl"] or d.direction != s["direction"]:
+            return
+        s["signal_sl"], s["temp_sl"] = d.sl, False
+        positions, orders = await self.b.positions(self.sym), await self.b.orders(self.sym)
+        bid, ask = await self.b.price(self.sym)
+        for leg in self._legs_active(s):
+            pos, order = self._find(leg, positions, orders)
+            try:
+                if order:
+                    await self.b.modify_order(order["ticket"], self.sym, order["price"], self._r(d.sl), order["tp"])
+                elif pos and self._sl_valid(s["direction"], d.sl, bid, ask):
+                    await self.b.modify_position(pos["ticket"], self.sym, self._r(d.sl), pos["tp"])
+                log.info("Signal %s leg %d: SL from the group set to %s", s["msg_id"], leg["n"], self._r(d.sl))
+            except BrokerError as e:
+                log.warning("Signal %s leg %d: could not set SL %s: %s", s["msg_id"], leg["n"], d.sl, e)
+
+    async def _finish_draft(self, s, sig: Signal):
+        """The admin finished the signal (SL + TPs): fix every entry already placed and add the rest.
+        Waiting orders are replaced (right price, lot size, SL, TP). Entries already in the trade
+        get the real SL/TP, and their lot is reduced if the real SL makes it risk too much."""
+        msg_id = s["msg_id"]
+        log.info("Signal %s is complete now: %s entry %s SL %s TPs %s - updating the orders",
+                 msg_id, sig.direction, sig.entry_low if sig.entry_low == sig.entry_high
+                 else f"{sig.entry_low} & {sig.entry_high}", sig.sl, sig.tps)
+        positions, orders = await self.b.positions(self.sym), await self.b.orders(self.sym)
+        bid, ask = await self.b.price(self.sym)
+        if sig.direction != s["direction"]:
+            for leg in self._legs_active(s):
+                pos, order = self._find(leg, positions, orders)
+                if order:
+                    await self.b.cancel_order(order["ticket"])
+                if pos:
+                    await self.b.close_position(pos["ticket"], self.sym)
+                leg["status"] = "closed"
+            log.warning("Signal %s changed direction - old orders removed", msg_id)
+            del self.state.signals[msg_id]
+            return await self._open(msg_id, sig)
+
+        prices = self._entry_prices(sig)
+        n_share = len(prices) if self.c["split_risk"] else 1
+        filled = []
+        for leg in self._legs_active(s):
+            pos, order = self._find(leg, positions, orders)
+            if order:
+                await self.b.cancel_order(order["ticket"])
+                leg["status"] = "replaced"
+                self.journal.write("replaced", msg_id=msg_id, leg=leg["n"], ticket=order["ticket"],
+                                   details="unfinished signal completed - order placed again")
+            elif pos:
+                filled.append((leg, pos))
+
+        s.update(tps=sig.tps, signal_sl=sig.sl, entry_low=sig.entry_low, entry_high=sig.entry_high,
+                 sig=sig.to_dict(), draft=False, temp_sl=False)
+        used = set()
+        step, vmin = self._step(), self.info.get("vol_min", 0.01)
+        for leg, pos in filled:
+            # which entry of the finished signal is this trade?
+            cands = [(abs((p if p is not None else pos["open_price"]) - pos["open_price"]), i)
+                     for i, p in enumerate(prices) if i not in used]
+            idx = min(cands)[1] if cands else 0
+            used.add(idx)
+            leg["n"] = idx + 1
+            if not self._sl_valid(s["direction"], sig.sl, bid, ask):
+                await self.b.close_position(pos["ticket"], self.sym)
+                leg["status"] = "closed"
+                log.warning("Signal %s leg %d: price is already past the real SL %s - trade closed",
+                            msg_id, leg["n"], sig.sl)
+                self.journal.write("closed", msg_id=msg_id, leg=leg["n"], ticket=pos["ticket"],
+                                   details="past the real SL when the signal was completed")
+                continue
+            target, note = await self._size(sig, pos["open_price"], n_share)
+            volume = pos["volume"]
+            if target <= 0:
+                await self.b.close_position(pos["ticket"], self.sym)
+                leg["status"] = "closed"
+                log.warning("Signal %s leg %d closed: with the real SL %s %s", msg_id, leg["n"], sig.sl, note)
+                continue
+            excess = round(math.floor((volume - target) / step + 1e-9) * step, 8)
+            if excess >= vmin:
+                await self.b.close_position(pos["ticket"], self.sym, excess)
+                volume = round(volume - excess, 8)
+                log.info("Signal %s leg %d: real SL is wider than the temporary one - closed %.2f lots "
+                         "to keep the risk at the planned %%", msg_id, leg["n"], excess)
+            leg["volume"] = volume
+            tp1_only = (self.c["partial_close"]["enabled"] and len(sig.tps) > 1 and not self._splittable(volume))
+            leg["tp_mode"] = "tp1" if tp1_only else "last"
+            tp = self._r(sig.tps[0]) if tp1_only else self._r(sig.last_tp)
+            sl = self._r(sig.sl) if leg["stage"] == 0 else pos["sl"]
+            await self.b.modify_position(pos["ticket"], self.sym, sl, tp)
+            log.info("Signal %s leg %d updated: %.2f lots, SL %s, TP %s (%s)", msg_id, leg["n"], volume, sl, tp,
+                     self._plan_text(volume, sig.tps, tp1_only))
+            self.journal.write("completed", msg_id=msg_id, leg=leg["n"], volume=volume, sl=sl, tp=tp,
+                               ticket=pos["ticket"])
+        s["legs"] = [l for l in s["legs"] if l["status"] != "replaced"]
+        await self._open(msg_id, sig, rec=s, skip=used)
+        _refresh(s)
 
     async def _size(self, sig: Signal, entry, n_share):
         acct = await self.b.account_info()
@@ -473,6 +640,8 @@ class Engine:
 
     # ------------------------------------------------------------ edits
     async def _apply_edit(self, s, sig: Signal):
+        if s.get("draft"):
+            return await self._finish_draft(s, sig)
         if s["status"] not in ACTIVE or sig.direction != s["direction"]:
             return
         if sig.tps == s["tps"] and sig.sl == s["signal_sl"]:
@@ -755,7 +924,7 @@ class Engine:
 
     async def _protect(self, s, leg, pos, bid, ask):
         be = self.c["breakeven"]
-        if not be["enabled"]:
+        if not be["enabled"] or not s["tps"]:
             return
         buy = s["direction"] == "BUY"
         px = bid if buy else ask
@@ -793,11 +962,15 @@ class Engine:
     async def _manage_pending(self, s, leg, order, bid, ask):
         age_min = (time.time() - leg["created"]) / 60
         buy = s["direction"] == "BUY"
-        tp1 = s["tps"][0]
         why = None
         if age_min > float(self.c["pending_expiry_minutes"]):
             why = f"not filled after {self.c['pending_expiry_minutes']} min"
+        elif s.get("draft") or not s["tps"]:
+            if age_min > float(self.c["early_entry"]["complete_minutes"]):
+                why = (f"the admin did not finish the signal (SL/TP) within "
+                       f"{self.c['early_entry']['complete_minutes']} min")
         else:
+            tp1 = s["tps"][0]
             # A waiting limit order is only "missed" if price actually came to the entry (within
             # entry_tolerance) and then ran to TP1 without filling it, or if another entry of the
             # same signal is already in the trade. Price wobbling up to TP1 from just above the

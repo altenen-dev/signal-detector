@@ -111,6 +111,9 @@ class ParseResult:
     signal: Optional[Signal] = None
     commands: List[Command] = field(default_factory=list)
     reason: str = ""
+    # an unfinished signal: direction + entry price(s), SL and/or TPs not written yet
+    # ("GOLD BUY  Entry: 4052 & 4049  SL:  TP:"). sl is None when no SL yet, tps is [].
+    draft: Optional[Signal] = None
 
 
 # ================================================================ helpers
@@ -160,7 +163,9 @@ def parse_signal(text: str, require_symbol_word: bool = False) -> ParseResult:
             sl = nums[0]
             break
     if sl is None:
-        return ParseResult(reason="no stop loss price" if dirs else "no BUY/SELL")
+        if not dirs:
+            return ParseResult(reason="no BUY/SELL")
+        return ParseResult(reason="no stop loss price", draft=_draft(t, dirs, segs, None))
 
     entries = []
     for seg in segs["DIR"] + segs["ENT"]:
@@ -214,7 +219,8 @@ def parse_signal(text: str, require_symbol_word: bool = False) -> ParseResult:
             continue                        # duplicates / stray numbers going backwards
         tps.append(x)
     if not tps:
-        return ParseResult(reason="no valid take profit")
+        return ParseResult(reason="no valid take profit",
+                           draft=_draft(t, dirs, segs, sl) if dirs else None)
 
     if entry_low is not None:
         if buy and not (sl < entry_low):
@@ -225,6 +231,36 @@ def parse_signal(text: str, require_symbol_word: bool = False) -> ParseResult:
     return ParseResult(signal=Signal(direction=direction, sl=sl, tps=tps,
                                      entry_low=entry_low, entry_high=entry_high,
                                      order_kind=order_kind, market=market or entry_low is None))
+
+
+def _draft(t, dirs, segs, sl) -> Optional[Signal]:
+    """direction + entry price(s) but SL/TPs still missing. Entries are checked against the
+    market by the engine (a typo such as 5049 in a 4050 signal is dropped there)."""
+    entries = []
+    for seg in segs["DIR"] + segs["ENT"]:
+        for n in _numbers(seg):
+            if n >= 100 and n not in entries and (sl is None or abs(n - sl) / sl * 100 <= PLAUSIBLE_PCT):
+                entries.append(n)
+    if not entries:
+        return None
+    # only a signal being typed counts, not chat such as "نرجع نشتري 3903":
+    # it needs an order type (LIMIT / STOP / NOW / امر معلق), an "Entry" label, or SL / TP lines
+    typed = bool(dirs[0].group(1) and dirs[0].group(2)) or bool(PENDING_AR_RE.search(t)) \
+        or bool(MARKET_RE.search((segs["DIR"][0] if segs["DIR"] else "") + " " + t[:dirs[0].start()])) \
+        or bool(segs["ENT"]) or bool(segs["SL"]) or bool(segs["TP"])
+    if not typed:
+        return None
+    direction = _dir_of(dirs[0])
+    if sl is not None:
+        entries = [e for e in entries if (e > sl if direction == "BUY" else e < sl)]
+        if not entries:
+            return None
+    order_kind = dirs[0].group(2) if dirs[0].group(1) else None
+    if order_kind is None and PENDING_AR_RE.search(t):
+        order_kind = "LIMIT"
+    head = (segs["DIR"][0] if segs["DIR"] else "") + " " + t[:dirs[0].start()]
+    return Signal(direction=direction, sl=sl, tps=[], entry_low=min(entries[:2]), entry_high=max(entries[:2]),
+                  order_kind=order_kind, market=bool(MARKET_RE.search(head)))
 
 
 # ================================================================ commands (English)
