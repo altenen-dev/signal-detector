@@ -61,6 +61,10 @@ def main():
         while True:
             time.sleep(2)
             if bot.poll() is not None:
+                if bot.returncode == 3:
+                    say("another copy of the bot is already running in this folder - this one stops. "
+                        "Close the other window (or VS Code) first if you want to run it from here.")
+                    sys.exit(3)
                 say(f"bot stopped (code {bot.returncode}) - restarting in {RESTART_DELAY} s")
                 time.sleep(RESTART_DELAY)
                 bot, prints = start_bot(), fingerprint()

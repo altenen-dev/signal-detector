@@ -9,6 +9,7 @@ state.json
 state.json.tmp
 trades_journal.csv
 bot.log
+bot.lock
 # exported group history
 group_messages.json
 parser_report.txt

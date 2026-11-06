@@ -109,7 +109,19 @@ class State:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.data, f, indent=2)
-        os.replace(tmp, self.path)
+        # Windows refuses to replace a file that another program has open for a moment
+        # (VS Code, antivirus, Windows Search, OneDrive) - wait a little and try again
+        for attempt in range(10):
+            try:
+                os.replace(tmp, self.path)
+                self._warned = False
+                return
+            except PermissionError:
+                time.sleep(0.2)
+        if not getattr(self, "_warned", False):
+            log.warning("Could not save state.json - another program keeps it open (an editor, antivirus "
+                        "or OneDrive?). Close it there; the bot keeps trying every few seconds.")
+            self._warned = True
 
     @property
     def signals(self) -> Dict[str, Dict]:

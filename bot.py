@@ -54,9 +54,34 @@ async def resolve_chat(client, chat):
     return await client.get_entity(chat)
 
 
+ALREADY_RUNNING = 3          # exit code: another copy is running in this folder (run.py stops then)
+
+
+def single_instance():
+    """Two copies in one folder would trade every signal twice - allow only one."""
+    path = os.path.join(HERE, "bot.lock")
+    f = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return None
+    return f                 # keep the file open (and locked) while the bot runs
+
+
 async def main():
     setup_logging()
     log = logging.getLogger("bot")
+    lock = single_instance()
+    if lock is None:
+        log.error("ANOTHER COPY OF THE BOT IS ALREADY RUNNING in this folder (maybe in VS Code or another "
+                  "window). Only one may run, otherwise every signal is traded twice. Close the other one.")
+        sys.exit(ALREADY_RUNNING)
     cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "config.yaml"))
     tg, trading = cfg["telegram"], cfg.get("trading", {})
 
